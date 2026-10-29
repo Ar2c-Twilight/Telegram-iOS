@@ -70,6 +70,7 @@ private enum DebugControllerEntry: ItemListNodeEntry {
     case logToConsole(PresentationTheme, Bool)
     case redactSensitiveData(PresentationTheme, Bool)
     case keepChatNavigationStack(PresentationTheme, Bool)
+    case disablePeekDragChatSwitch(Bool)
     case skipReadHistory(PresentationTheme, Bool)
     case alwaysDisplayTyping(Bool)
     case debugRatingLayout(Bool)
@@ -135,7 +136,7 @@ private enum DebugControllerEntry: ItemListNodeEntry {
             return DebugControllerSection.logging.rawValue
         case .webViewInspection, .resetWebViewCache:
             return DebugControllerSection.web.rawValue
-        case .keepChatNavigationStack, .skipReadHistory, .alwaysDisplayTyping, .debugRatingLayout, .crashOnSlowQueries, .crashOnMemoryPressure:
+        case .keepChatNavigationStack, .disablePeekDragChatSwitch, .skipReadHistory, .alwaysDisplayTyping, .debugRatingLayout, .crashOnSlowQueries, .crashOnMemoryPressure:
             return DebugControllerSection.experiments.rawValue
         case .clearTips, .resetNotifications, .crash, .fillLocalSavedMessageCache, .resetDatabase, .resetDatabaseAndCache, .resetHoles, .resetTagHoles, .reindexUnread, .resetCacheIndex, .reindexCache, .resetBiometricsData, .optimizeDatabase, .photoPreview, .knockoutWallpaper, .compressedEmojiCache, .storiesJpegExperiment, .checkSerializedData, .enableQuickReactionSwitch, .experimentalCompatibility, .enableDebugDataDisplay, .fakeGlass, .forceClearGlass, .debugRipple, .debugRichText, .browserExperiment, .allForumsHaveTabs, .enableReactionOverrides, .restorePurchases, .disableReloginTokens, .liveStreamV2, .experimentalCallMute, .playerV2, .devRequests, .enableUpdates, .pwa, .enableLocalTranslation:
             return DebugControllerSection.experiments.rawValue
@@ -190,6 +191,8 @@ private enum DebugControllerEntry: ItemListNodeEntry {
             return 17
         case .debugRatingLayout:
             return 18
+        case .disablePeekDragChatSwitch:
+            return 19
         case .crashOnSlowQueries:
             return 20
         case .crashOnMemoryPressure:
@@ -965,6 +968,10 @@ private enum DebugControllerEntry: ItemListNodeEntry {
                     return settings
                 }).start()
             })
+        case let .disablePeekDragChatSwitch(value):
+            return ItemListSwitchItem(presentationData: presentationData, systemStyle: .glass, title: "Peek: no chat switch on drag", value: value, sectionId: self.section, style: .blocks, updated: { value in
+                NavigationPeekDebugSettings.disableDragChatSwitch = value
+            })
         case let .skipReadHistory(_, value):
             return ItemListSwitchItem(presentationData: presentationData, systemStyle: .glass, title: "Skip read history", value: value, sectionId: self.section, style: .blocks, updated: { value in
                 let _ = updateExperimentalUISettingsInteractively(accountManager: arguments.sharedContext.accountManager, { settings in
@@ -1564,6 +1571,7 @@ private func debugControllerEntries(context: AccountContext?, sharedContext: Sha
         entries.append(.resetWebViewCache(presentationData.theme))
         
         entries.append(.keepChatNavigationStack(presentationData.theme, experimentalSettings.keepChatNavigationStack))
+        entries.append(.disablePeekDragChatSwitch(NavigationPeekDebugSettings.disableDragChatSwitch))
         #if DEBUG
         entries.append(.skipReadHistory(presentationData.theme, experimentalSettings.skipReadHistory))
         #endif

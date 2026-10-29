@@ -1134,6 +1134,21 @@ public enum ChatControllerAnimateInnerChatSwitchDirection {
     case right
 }
 
+/// A chat picked by the detent's vertical drag, with the direction it was picked from.
+///
+/// The direction matters because switching the chat in place has a real animation available — the
+/// outgoing history slides out and the incoming one slides in — and it only reads correctly if it
+/// runs the same way the finger is going.
+public struct NavigationPeekChatSelection {
+    public let location: ChatLocation
+    public let direction: ChatControllerAnimateInnerChatSwitchDirection?
+
+    public init(location: ChatLocation, direction: ChatControllerAnimateInnerChatSwitchDirection?) {
+        self.location = location
+        self.direction = direction
+    }
+}
+
 public protocol ChatController: ViewController {
     var chatLocation: ChatLocation { get }
     var canReadHistory: ValuePromise<Bool> { get }

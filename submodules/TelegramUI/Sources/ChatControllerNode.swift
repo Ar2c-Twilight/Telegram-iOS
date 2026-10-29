@@ -267,6 +267,82 @@ class ChatControllerNode: ASDisplayNode, ASScrollViewDelegate {
     private var headerPanelsView: ComponentView<Empty>?
     private var footerPanelsView: ComponentView<Empty>?
     
+    /// Everything that belongs to *using* this page steps aside while it is becoming a backdrop.
+    ///
+    /// Lives here rather than in the controller because most of these are private to this file —
+    /// and because the set is a property of the node's own structure, so it belongs next to it.
+    /// A gradient mask over the history, transparent at the very top and bottom.
+    ///
+    /// Only while the preview is up: with the edge effects faded out there is nothing else there
+    /// to stop the content ending in a hard line.
+    private func updatePeekEdgeFade(presence: CGFloat) {
+        guard presence > 0.0 else {
+            if self.peekEdgeFadeLayer != nil {
+                self.historyNodeContainer.layer.mask = nil
+                self.peekEdgeFadeLayer = nil
+            }
+            return
+        }
+
+        let layer: CAGradientLayer
+        if let current = self.peekEdgeFadeLayer {
+            layer = current
+        } else {
+            layer = CAGradientLayer()
+            layer.startPoint = CGPoint(x: 0.5, y: 0.0)
+            layer.endPoint = CGPoint(x: 0.5, y: 1.0)
+            layer.colors = [
+                UIColor.clear.cgColor,
+                UIColor.white.cgColor,
+                UIColor.white.cgColor,
+                UIColor.clear.cgColor
+            ]
+            self.peekEdgeFadeLayer = layer
+            self.historyNodeContainer.layer.mask = layer
+        }
+
+        let height = self.historyNodeContainer.bounds.height
+        let band = height > 0.0 ? min(0.08, 28.0 / height) : 0.0
+        // The fade only has to be as deep as the content has pulled away from the edge, so it
+        // appears with the shrink rather than being there all along.
+        let depth = band * presence
+        layer.locations = [0.0, depth as NSNumber, (1.0 - depth) as NSNumber, 1.0]
+        layer.frame = self.historyNodeContainer.bounds
+    }
+
+    func updatePeekPresence(_ presence: CGFloat) {
+        let alpha = 1.0 - presence
+
+        self.inputPanelContainerNode.alpha = alpha
+        // The two frosted strips behind the bar and the input. They are siblings of the wallpaper
+        // inside the content container, not children of the bar or the panel, which is why fading
+        // those two left these behind.
+        self.topBackgroundEdgeEffectNode?.alpha = alpha
+        self.bottomBackgroundEdgeEffectNode?.alpha = alpha
+        // Pinned message and the rest of the panels that stack under the bar.
+        self.titleAccessoryPanelContainer.alpha = alpha
+        self.floatingTopicsPanelContainer.alpha = alpha
+        self.inputContextPanelContainer.alpha = alpha
+        self.inputContextOverTextPanelContainer.alpha = alpha
+        // Scroll-to-bottom. Same family: a control for reading this page.
+        self.navigateButtons.alpha = alpha
+
+        // Content pulls in as the wallpaper spreads out. Same number, so one movement.
+        let scale = 1.0 - presence * (1.0 - NavigationInteractiveDetentMetrics.peekContentScale)
+        self.historyNodeContainer.layer.transform = CATransform3DMakeScale(scale, scale, 1.0)
+
+        // The razor edge at the top and bottom.
+        //
+        // The history is cut by `ChatControllerNode`, at the screen edge — it always was. What
+        // hid the cut was the wallpaper's own edge effects sitting over those two bands, and the
+        // preview fades those out. Shrinking the content then carries the cut inwards, away from
+        // the edge, and it becomes a straight line across a half-drawn bubble.
+        //
+        // So: put a soft fade back where the glass used to be. Same job, none of the chrome.
+        self.updatePeekEdgeFade(presence: presence)
+    }
+
+    private var peekEdgeFadeLayer: CAGradientLayer?
     private var topBackgroundEdgeEffectNode: WallpaperEdgeEffectNode?
     private var bottomBackgroundEdgeEffectNode: WallpaperEdgeEffectNode?
     
@@ -2158,14 +2234,26 @@ class ChatControllerNode: ASDisplayNode, ASScrollViewDelegate {
                 
                 previousHistoryNode.clipsToBounds = true
                 self.historyNode.clipsToBounds = true
-                
-                transition.animatePosition(layer: self.historyNode.layer, from: CGPoint(x: offsetMultiplier.x * layout.size.width, y: offsetMultiplier.y * layout.size.height), to: CGPoint(), removeOnCompletion: true, additive: true, completion: { [weak self] _ in
+
+                let duration = NavigationInteractiveDetentMetrics.chatSwitchDuration
+                let travel = CGPoint(
+                    x: offsetMultiplier.x * layout.size.width * NavigationInteractiveDetentMetrics.chatSwitchTravel,
+                    y: offsetMultiplier.y * layout.size.height * NavigationInteractiveDetentMetrics.chatSwitchTravel
+                )
+                let scale = NavigationInteractiveDetentMetrics.chatSwitchScale
+                let blurRadius = NavigationInteractiveDetentMetrics.chatSwitchBlurRadius
+                let curve = NavigationInteractiveDetentMetrics.chatSwitchCurve
+                let timingFunction = CAMediaTimingFunction(controlPoints: curve.0, curve.1, curve.2, curve.3)
+
+                self.animateChatSwitchHalf(layer: self.historyNode.layer, timingFunction: timingFunction, duration: duration, position: (travel, CGPoint()), alpha: (0.0, 1.0), scale: (scale, 1.0), blur: (blurRadius, 0.0), completion: { [weak self] in
                     guard let self else {
                         return
                     }
                     self.historyNode.clipsToBounds = false
+                    // An idle filter keeps the layer on an offscreen pass forever.
+                    self.historyNode.layer.filters = []
                 })
-                transition.animatePosition(layer: previousHistoryNode.layer, from: CGPoint(), to: CGPoint(x: -offsetMultiplier.x * layout.size.width, y: -offsetMultiplier.y * layout.size.height), removeOnCompletion: false, additive: true, completion: { [weak previousHistoryNode] _ in
+                self.animateChatSwitchHalf(layer: previousHistoryNode.layer, timingFunction: timingFunction, duration: duration, position: (CGPoint(), CGPoint(x: -travel.x, y: -travel.y)), alpha: (1.0, 0.0), scale: (1.0, scale), blur: (0.0, blurRadius), completion: { [weak previousHistoryNode] in
                     previousHistoryNode?.removeFromSupernode()
                 })
                 
@@ -5720,6 +5808,51 @@ class ChatControllerNode: ASDisplayNode, ASScrollViewDelegate {
         return historyNode
     }
     
+    /// One half of the in-place chat switch: travel, fade, scale and blur, all on one curve.
+    ///
+    /// Position is additive so it composes with whatever the layout is setting in the same pass,
+    /// rather than replacing it — the slide is an offset on top of the real position, not a
+    /// substitute for it.
+    private func animateChatSwitchHalf(
+        layer: CALayer,
+        timingFunction: CAMediaTimingFunction,
+        duration: Double,
+        position: (CGPoint, CGPoint),
+        alpha: (CGFloat, CGFloat),
+        scale: (CGFloat, CGFloat),
+        blur: (CGFloat, CGFloat),
+        completion: @escaping () -> Void
+    ) {
+        if let filter = CALayer.blur() {
+            filter.setValue(blur.0 as NSNumber, forKey: "inputRadius")
+            layer.filters = [filter]
+        }
+
+        var specs: [(keyPath: String, from: Any, to: Any, additive: Bool)] = [
+            ("position", NSValue(cgPoint: position.0), NSValue(cgPoint: position.1), true),
+            ("opacity", alpha.0 as NSNumber, alpha.1 as NSNumber, false),
+            ("transform.scale", scale.0 as NSNumber, scale.1 as NSNumber, false)
+        ]
+        if !(layer.filters?.isEmpty ?? true) {
+            specs.append(("filters.gaussianBlur.inputRadius", blur.0 as NSNumber, blur.1 as NSNumber, false))
+        }
+
+        for (index, spec) in specs.enumerated() {
+            layer.animate(
+                from: spec.from,
+                to: spec.to,
+                keyPath: spec.keyPath,
+                timingFunction: CAMediaTimingFunctionName.easeOut.rawValue,
+                duration: duration,
+                mediaTimingFunction: timingFunction,
+                removeOnCompletion: false,
+                additive: spec.additive,
+                // One callback, on the first one only — they all share a duration.
+                completion: index == 0 ? { _ in completion() } : nil
+            )
+        }
+    }
+
     func prepareSwitchToChatLocation(chatLocation: ChatLocation, historyNode: ChatHistoryListNodeImpl, animationDirection: ChatControllerAnimateInnerChatSwitchDirection?) {
         self.chatLocation = chatLocation
         if historyNode === self.historyNode {

@@ -58,6 +58,43 @@ open class TabBarControllerImpl: ViewController, TabBarController {
             controller.updateNavigationCustomData(data, progress: progress, transition: transition)
         }
     }
+
+    open override func updateNavigationPeekHighlight(_ data: Any?, progress: CGFloat, transition: ContainedViewLayoutTransition) {
+        for controller in self.controllers {
+            controller.updateNavigationPeekHighlight(data, progress: progress, transition: transition)
+        }
+    }
+
+    open override func updateNavigationPeekDrag(_ point: CGPoint?, velocityY: CGFloat) -> Any? {
+        var result: Any?
+        for controller in self.controllers {
+            if let value = controller.updateNavigationPeekDrag(point, velocityY: velocityY), result == nil {
+                result = value
+            }
+        }
+        return result
+    }
+
+    open override func updateNavigationPeekPresence(_ presence: CGFloat) {
+        if self.isNodeLoaded {
+            self.tabBarControllerNode.updatePeekPresence(presence)
+        }
+        for controller in self.controllers {
+            controller.updateNavigationPeekPresence(presence)
+        }
+    }
+
+    open override func updateNavigationPeekLean(_ lean: CGFloat) {
+        for controller in self.controllers {
+            controller.updateNavigationPeekLean(lean)
+        }
+    }
+
+    open override func updateNavigationPeekProgress(_ progress: CGFloat, transition: ContainedViewLayoutTransition) {
+        for controller in self.controllers {
+            controller.updateNavigationPeekProgress(progress, transition: transition)
+        }
+    }
     
     public private(set) var controllers: [ViewController] = []
     
@@ -84,6 +121,14 @@ open class TabBarControllerImpl: ViewController, TabBarController {
         }
     }
     
+    open override var supportsNavigationDetentColumn: Bool {
+        return self.currentController?.supportsNavigationDetentColumn ?? false
+    }
+
+    open override var navigationPeekDragRequestedSwitch: Bool {
+        return self.currentController?.navigationPeekDragRequestedSwitch ?? false
+    }
+
     public var currentController: ViewController?
     
     override public var transitionNavigationBar: NavigationBar? {

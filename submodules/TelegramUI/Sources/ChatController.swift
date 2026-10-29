@@ -7126,6 +7126,39 @@ public final class ChatControllerImpl: TelegramBaseController, ChatController, G
         }
     }
     
+    override public func updateNavigationPeekSubject(_ subject: Any?) -> Bool {
+        guard let selection = subject as? NavigationPeekChatSelection, self.isNodeLoaded else {
+            return false
+        }
+        if selection.location == self.chatLocation {
+            return true
+        }
+        // Hands the direction through to the switch, which has a real animation for it: the
+        // outgoing history slides out and the incoming one slides in, both clipped. Passing nil
+        // — which is what this path did before anyone used it — swaps the content on one frame,
+        // and that is the whole of the stiffness.
+        self.updateChatLocationToOther(chatLocation: selection.location, animationDirection: selection.direction)
+        return true
+    }
+
+    override public var supportsNavigationDetent: Bool {
+        return true
+    }
+
+    override public func updateNavigationPeekPresence(_ presence: CGFloat) {
+        self.navigationBar?.alpha = 1.0 - presence
+        if self.isNodeLoaded {
+            self.chatDisplayNode.updatePeekPresence(presence)
+        }
+    }
+
+    override public var navigationPeekBackdropNode: ASDisplayNode? {
+        if self.isNodeLoaded {
+            return self.chatDisplayNode.backgroundNode
+        }
+        return nil
+    }
+
     var chatDisplayNode: ChatControllerNode {
         get {
             return super.displayNode as! ChatControllerNode
@@ -11013,7 +11046,7 @@ public final class ChatControllerImpl: TelegramBaseController, ChatController, G
     private(set) var isUpdatingChatLocationThread: Bool = false
     var currentChatSwitchDirection: ChatControllerAnimateInnerChatSwitchDirection?
     
-    func updateChatLocationToOther(chatLocation: ChatLocation) {
+    func updateChatLocationToOther(chatLocation: ChatLocation, animationDirection: ChatControllerAnimateInnerChatSwitchDirection? = nil, completion: (() -> Void)? = nil) {
         self.saveInterfaceState()
         self.chatDisplayNode.dismissTextInput()
         
@@ -11029,9 +11062,10 @@ public final class ChatControllerImpl: TelegramBaseController, ChatController, G
             self.currentChatSwitchDirection = nil
             self.chatLocation = updatedChatLocation
             historyNode.areContentAnimationsEnabled = true
-            self.chatDisplayNode.prepareSwitchToChatLocation(chatLocation: chatLocation, historyNode: historyNode, animationDirection: nil)
+            self.chatDisplayNode.prepareSwitchToChatLocation(chatLocation: chatLocation, historyNode: historyNode, animationDirection: animationDirection)
             
             apply(self.didAppear ? .animated(duration: 0.4, curve: .spring) : .immediate)
+            completion?()
             
             self.currentChatSwitchDirection = nil
             self.isUpdatingChatLocationThread = false

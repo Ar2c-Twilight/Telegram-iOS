@@ -56,6 +56,12 @@ final class TabBarControllerNode: ASDisplayNode {
     private let contextAction: (Int, ContextExtractedContentContainingView, ContextGesture) -> Void
     
     private let tabBarView = ComponentView<Empty>()
+
+    /// Fade the bar out while the detent is being predicted: it belongs to using this page, and
+    /// this page is becoming a column to pick from rather than a page to use.
+    func updatePeekPresence(_ presence: CGFloat) {
+        self.tabBarView.view?.alpha = 1.0 - presence
+    }
     
     private let disabledOverlayNode: ASDisplayNode
     private var toolbar: ComponentView<Empty>?
