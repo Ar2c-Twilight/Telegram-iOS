@@ -1126,6 +1126,46 @@ final class ChatListControllerNode: ASDisplayNode, ASGestureRecognizerDelegate {
     private let animationRenderer: MultiAnimationRenderer
     
     let mainContainerNode: ChatListContainerNode
+
+    /// Selection drawn while a navigation transition is parked at a detent. Ours rather than the
+    /// per-row highlight, because the vertical gesture needs it to leave the row it belongs to.
+    private let peekHighlightNode = ChatListPeekHighlightNode()
+    private let peekSavedMessagesNode = ChatListPeekSavedMessagesNode()
+    /// Where the shortcut sits, in this node's coordinates. Nil until the first layout.
+    private var peekSavedMessagesFrame: CGRect?
+    /// Called when the shortcut is tapped. Wired by the controller, which is the only thing that
+    /// can reach the navigation stack.
+    var savedMessagesSelected: (() -> Void)?
+    private var peekHighlightLocation: ChatLocation?
+    private var peekHighlightProgress: CGFloat = 0.0
+    /// Finger position while the gesture has been taken over vertically, in this node's
+    /// coordinates. `nil` means the block simply sits on the selected row.
+    private var peekDragPoint: CGPoint?
+    private var peekDragRowLocation: ChatLocation?
+    /// The row whose chat is actually open, as opposed to the one the block is sitting on.
+    private var peekDragCommittedLocation: ChatLocation?
+    private var peekDragCommittedRowY: CGFloat?
+    /// Offset applied to the block before the gesture is taken over.
+    private var peekLean: CGFloat = 0.0
+    private(set) var peekDragRequestedSwitch: Bool = false
+
+    /// One spring per edge of the leading piece, in this node's coordinates.
+    ///
+    /// Four springs rather than one frame: each edge chases its own target with its own lag, so
+    /// the block stretches when it moves and squashes when it lands. The deformation *is* the
+    /// disagreement between the springs — there is no separate animation for it.
+    private let edgeTopSpring = NavigationSpringScalar()
+    private let edgeBottomSpring = NavigationSpringScalar()
+    private let edgeLeftSpring = NavigationSpringScalar()
+    private let edgeRightSpring = NavigationSpringScalar()
+    /// Whether the springs are driving the block, as opposed to it sitting on its row.
+    private var highlightEdgesActive = false
+    private var peekHighlightRowFrame: CGRect?
+
+    /// How strongly the detent is predicted, 0…1.
+    private var peekPresence: CGFloat = 0.0
+    /// How far the page above has travelled, 0 = covering this one, 1 = gone.
+    private var peekProgress: CGFloat = 1.0
     
     var effectiveContainerNode: ChatListContainerNode {
         if let inlineStackContainerNode = self.inlineStackContainerNode {
@@ -1218,6 +1258,11 @@ final class ChatListControllerNode: ASDisplayNode, ASGestureRecognizerDelegate {
         self.backgroundColor = presentationData.theme.chatList.backgroundColor
         
         self.addSubnode(self.mainContainerNode)
+        self.addSubnode(self.peekHighlightNode)
+        self.peekSavedMessagesNode.pressed = { [weak self] in
+            self?.savedMessagesSelected?()
+        }
+        self.setupHighlightEdgeSprings()
         
         self.mainContainerNode.contentOffsetChanged = { [weak self] offset, listView in
             self?.contentOffsetChanged(offset: offset, listView: listView, isPrimary: true)
@@ -1829,6 +1874,10 @@ final class ChatListControllerNode: ASDisplayNode, ASGestureRecognizerDelegate {
     }
     
     func containerLayoutUpdated(_ layout: ContainerViewLayout, navigationBarHeight: CGFloat, visualNavigationHeight: CGFloat, cleanNavigationBarHeight: CGFloat, storiesInset: CGFloat, transition: ContainedViewLayoutTransition) {
+        self.peekHighlightNode.frame = CGRect(origin: CGPoint(), size: layout.size)
+        if self.peekHighlightLocation != nil {
+            self.updatePeekHighlightGeometry(transition: .immediate)
+        }
         var navigationBarHeight = navigationBarHeight
         var visualNavigationHeight = visualNavigationHeight
         var cleanNavigationBarHeight = cleanNavigationBarHeight
@@ -1843,6 +1892,10 @@ final class ChatListControllerNode: ASDisplayNode, ASGestureRecognizerDelegate {
         storiesInset = navigationBarLayout.storiesInset
         
         self.containerLayout = (layout, navigationBarHeight, visualNavigationHeight, cleanNavigationBarHeight, storiesInset)
+        // After the assignment above, not before: the heights this reads are the ones the
+        // navigation bar just recomputed, and the parameters are the pre-adjustment values.
+        self.updatePeekSavedMessagesGeometry(transition: transition)
+        self.applyPeekAppearance(transition: transition)
         
         var insets = layout.insets(options: [.input])
         insets.top += navigationBarHeight
@@ -2149,7 +2202,464 @@ final class ChatListControllerNode: ASDisplayNode, ASGestureRecognizerDelegate {
         }
     }
     
+    func updatePeekHighlight(location: ChatLocation?, progress: CGFloat, transition: ContainedViewLayoutTransition) {
+        self.peekHighlightLocation = location
+        self.peekHighlightProgress = progress
+        self.updatePeekHighlightGeometry(transition: transition)
+    }
+
+    /// Resolve where the selected row currently is and lay the block over it.
+    ///
+    /// Asks the visible item nodes rather than computing from an index: the list is a `ListView`,
+    /// where rows are placed by the view itself and there is no row-index-to-frame arithmetic to
+    /// do. Converting through the view also takes scrolling and insets along for free.
+    /// The gesture has been taken over vertically and is now driving the block through the rows.
+    ///
+    /// Switches the chat on every row crossed, with nothing debounced: the block tracking the
+    /// finger while the chat lags behind would be two different answers to "which row is this"
+    /// on screen at the same time.
+    /// Returns the row the column has settled on, when that changes.
+    ///
+    /// Returns it rather than opening it: opening a chat builds a controller and lays it out,
+    /// about 90 ms of blocked main thread. The caller points the chat that is already there at
+    /// this instead, which costs a history node and nothing else.
+    @discardableResult
+    func updatePeekDrag(windowPoint: CGPoint?, velocityY: CGFloat) -> Any? {
+        guard let windowPoint else {
+            // Released. Whatever row the block ended on is the choice, regardless of speed.
+            var released: NavigationPeekChatSelection?
+            if let point = self.peekDragPoint, let (node, location) = self.peekRow(atY: point.y) {
+                if location != self.peekDragCommittedLocation {
+                    released = self.peekSelection(for: location, node: node)
+                }
+            }
+            // Nothing is being *opened* any more, so the detent has no load to wait out before
+            // it collapses.
+            self.peekDragRequestedSwitch = false
+
+            // Keep the block where the finger left it. Clearing this falls back to
+            // `peekHighlightLocation`, which is still the previous chat for a moment.
+            if let chosen = self.peekDragRowLocation {
+                self.peekHighlightLocation = chosen
+            }
+            self.peekDragPoint = nil
+            self.peekDragRowLocation = nil
+            self.peekDragCommittedLocation = nil
+            self.peekDragCommittedRowY = nil
+            // Hand the block straight back to its row. No settle.
+            //
+            // Every path out of a release collapses the detent, so a spring landing onto the row
+            // would play behind the fade-out: paid for and never seen. Worse, it is catchable —
+            // a second drag started before it finished found the block somewhere between two
+            // rows, which is how the stale position showed up at all.
+            //
+            // The geometry has to be re-resolved here. `peekHighlightRowFrame` is a cache and
+            // nothing refreshes it during a vertical drag — the list is not scrolling, no layout
+            // is running, the container is not re-pointing the selection — so it still holds the
+            // frame of the row the drag *started* on.
+            if self.highlightEdgesActive {
+                self.highlightEdgesActive = false
+                for spring in [self.edgeTopSpring, self.edgeBottomSpring, self.edgeLeftSpring, self.edgeRightSpring] {
+                    let _ = spring.stop()
+                }
+            }
+            self.updatePeekHighlightGeometry(transition: .immediate)
+            return released
+        }
+        self.peekDragPoint = self.view.convert(windowPoint, from: nil)
+
+        guard let (node, location) = self.peekRow(atY: self.peekDragPoint?.y ?? 0.0) else {
+            self.updatePeekHighlightGeometry(transition: .immediate)
+            return nil
+        }
+
+        self.peekDragRowLocation = location
+
+        // The springs own the block from here; no Core Animation transition, because two
+        // animations on one frame is the thing the springs exist to avoid.
+        let rowFrame = node.view.convert(node.bounds, to: self.view)
+        if !self.highlightEdgesActive {
+            self.highlightEdgesActive = true
+            // Seed from where the block actually *is*, which is its own row plus the lean it has
+            // already taken — not from the row the finger has reached. Seeding from the target
+            // makes the takeover a cut; seeding from the current position makes it a movement.
+            let origin = self.peekHighlightRowFrame ?? rowFrame
+            self.edgeTopSpring.reset(to: origin.minY + self.peekLean)
+            self.edgeBottomSpring.reset(to: origin.maxY + self.peekLean)
+            let shrink = max(0.0, ChatListPeekHighlightNode.columnWidth - origin.height) * self.peekPresence
+            self.edgeLeftSpring.reset(to: shrink / 2.0)
+            self.edgeRightSpring.reset(to: ChatListPeekHighlightNode.columnWidth - shrink / 2.0)
+            // The lean now lives in the springs' targets; leaving it on top would double it.
+            self.peekLean = 0.0
+            // Where the block came from, so the first switch has a direction like the rest.
+            self.peekDragCommittedRowY = origin.minY
+        }
+        self.retargetHighlightEdges(rowFrame: rowFrame, fingerY: self.peekDragPoint?.y ?? rowFrame.midY)
+        self.applyPeekHighlight(transition: .immediate)
+        // Re-applied every frame, not only when the presence changes: the list recycles and
+        // re-lays out rows while the finger is moving, and a row that comes back from the pool
+        // arrives at full opacity with nobody left to tell it otherwise.
+        self.applyPeekAppearance()
+
+        // The block follows the finger at every speed; the chat only follows once the finger has
+        // slowed to the point of having arrived somewhere.
+        if location != self.peekDragCommittedLocation,
+           abs(velocityY) < NavigationInteractiveDetentMetrics.peekDragCommitVelocity,
+           // Debug switch. The block keeps following the finger either way; only the chat behind it
+           // stops being re-pointed, so the springs and the material can be watched on their own.
+           !NavigationPeekDebugSettings.disableDragChatSwitch {
+            return self.peekSelection(for: location, node: node)
+        }
+        return nil
+    }
+
+    /// Put the shortcut in the strip the navigation bar empties out, and keep it there.
+    ///
+    /// It lives inside the bar's `peekAccessoryContainer` — a sibling of the bar's own contents,
+    /// so the two can trade places without either touching the other's alpha, and so the shortcut
+    /// sits above the progressive blur instead of under it. The container's frame is the bar's to
+    /// decide (it is the only thing that knows where the title ends and the tabs begin); all that
+    /// is left here is the column's own geometry inside it.
+    private func updatePeekSavedMessagesGeometry(transition: ContainedViewLayoutTransition) {
+        guard let containerLayout = self.containerLayout,
+              let navigationBarComponentView = self.navigationBarView.view as? ChatListNavigationBar.View else {
+            return
+        }
+        let container = navigationBarComponentView.peekAccessoryContainer
+        if self.peekSavedMessagesNode.view.superview !== container {
+            container.addSubview(self.peekSavedMessagesNode.view)
+        }
+
+        let frame = CGRect(
+            x: containerLayout.layout.safeInsets.left,
+            y: 0.0,
+            width: ChatListPeekHighlightNode.columnWidth,
+            height: container.bounds.height
+        )
+        transition.updateFrame(node: self.peekSavedMessagesNode, frame: frame)
+        self.peekSavedMessagesNode.update(
+            context: self.context,
+            theme: self.presentationData.theme,
+            size: frame.size,
+            transition: transition
+        )
+        // Kept in this node's coordinates: the block that marks it is drawn here, not in the bar.
+        self.peekSavedMessagesFrame = container.convert(frame, to: self.view)
+    }
+
+    /// The selection the shortcut stands for. Saved Messages is simply the chat with oneself.
+    ///
+    /// Built here rather than going through `peekTapSelection` because the shortcut is the one
+    /// thing in the column that is not a row — there is no item node to read a location off, and
+    /// the chat it opens need not be in the list at all.
+    func savedMessagesPeekSelection() -> Any? {
+        guard let frame = self.peekSavedMessagesFrame, self.peekPresence > 0.0 else {
+            return nil
+        }
+        var direction: ChatControllerAnimateInnerChatSwitchDirection?
+        if let previousY = self.peekHighlightRowFrame?.minY {
+            direction = frame.minY > previousY ? .down : .up
+        }
+        return NavigationPeekChatSelection(location: .peer(id: self.context.account.peerId), direction: direction)
+    }
+
+    /// Build the selection a tap should produce, so a tap and a drag go down one path.
+    ///
+    /// The location is read off the item exactly the way `peekRow(atY:)` reads it, so a tap can
+    /// only ever produce something the drag could produce too. Rows that need a different kind of
+    /// opening — forums, monoforums, communities — return nil and fall through to navigation.
+    ///
+    /// The direction compares the tapped row against where the block is sitting now, which is the
+    /// row of the chat currently open. Same comparison the drag makes, one step instead of many.
+    func peekTapSelection(peerId: EnginePeer.Id, threadId: Int64?) -> Any? {
+        guard threadId == nil, self.peekProgress < 1.0 else {
+            return nil
+        }
+        let wanted: ChatLocation = .peer(id: peerId)
+        var result: NavigationPeekChatSelection?
+        self.effectiveContainerNode.currentItemNode.forEachVisibleItemNode { node in
+            guard result == nil, let node = node as? ChatListItemNode, let item = node.item,
+                  let location = item.content.chatLocation, location == wanted else {
+                return
+            }
+            let rowY = node.view.convert(node.bounds, to: self.view).minY
+            var direction: ChatControllerAnimateInnerChatSwitchDirection?
+            if let previousY = self.peekHighlightRowFrame?.minY {
+                direction = rowY > previousY ? .down : .up
+            }
+            result = NavigationPeekChatSelection(location: location, direction: direction)
+        }
+        return result
+    }
+
+    /// Hand the block to the row that was tapped. Only after the container has accepted.
+    ///
+    /// Split from building the selection because the container can refuse — nothing parked, the
+    /// page on top not loaded — and the caller only finds that out afterwards. `peekHighlightLocation`
+    /// is otherwise the container's to set and the container's to clear, so writing it on a request
+    /// that then failed would leave a value nobody comes back for, and the list would keep
+    /// recomputing the block's geometry on every scroll frame for the rest of its life.
+    ///
+    /// The container deliberately does not re-point the block for us here: it reads the identity
+    /// off the chat page, which has not published the switch yet, so the block would snap back to
+    /// the previous row for the length of the collapse.
+    func commitPeekTapSelection(_ subject: Any) {
+        guard let selection = subject as? NavigationPeekChatSelection else {
+            return
+        }
+        self.peekHighlightLocation = selection.location
+        self.updatePeekHighlightGeometry(transition: .animated(duration: 0.3, curve: .easeInOut))
+    }
+
+    /// Pair the chosen chat with the direction it was chosen from, so the switch can animate the
+    /// same way the finger is travelling.
+    private func peekSelection(for location: ChatLocation, node: ChatListItemNode) -> NavigationPeekChatSelection {
+        let rowY = node.view.convert(node.bounds, to: self.view).minY
+        var direction: ChatControllerAnimateInnerChatSwitchDirection?
+        if let previousY = self.peekDragCommittedRowY {
+            direction = rowY > previousY ? .down : .up
+        }
+        self.peekDragCommittedLocation = location
+        self.peekDragCommittedRowY = rowY
+        return NavigationPeekChatSelection(location: location, direction: direction)
+    }
+
+
+    private func setupHighlightEdgeSprings() {
+        for spring in [self.edgeTopSpring, self.edgeBottomSpring] {
+            spring.dampingRatio = NavigationInteractiveDetentMetrics.highlightEdgeDamping
+        }
+        for spring in [self.edgeLeftSpring, self.edgeRightSpring] {
+            spring.stiffness = NavigationInteractiveDetentMetrics.highlightSideStiffness
+            spring.dampingRatio = NavigationInteractiveDetentMetrics.highlightSideDamping
+        }
+        for spring in [self.edgeTopSpring, self.edgeBottomSpring, self.edgeLeftSpring, self.edgeRightSpring] {
+            spring.onChange = { [weak self] _ in
+                self?.applyPeekHighlight(transition: .immediate)
+            }
+        }
+        self.edgeTopSpring.onSettle = { [weak self] in
+            guard let strongSelf = self, strongSelf.peekDragPoint == nil else {
+                return
+            }
+            // Landed after the finger let go; hand the block back to its row.
+            strongSelf.highlightEdgesActive = false
+        }
+    }
+
+    /// Aim the four springs at the row under the finger.
+    private func retargetHighlightEdges(rowFrame: CGRect, fingerY: CGFloat) {
+        // The lean is what gives the movement its detents: the block sits on rows, but leans a
+        // tenth of the way towards wherever the finger actually is inside one.
+        let lean = (fingerY - rowFrame.midY) * NavigationInteractiveDetentMetrics.highlightRowLeanFactor
+        let top = rowFrame.minY + lean
+        let bottom = rowFrame.maxY + lean
+
+        // Whichever edge is in front gets the stiffer spring, so the block stretches rather than
+        // sliding rigidly.
+        let movingDown = top >= self.edgeTopSpring.value
+        self.edgeTopSpring.stiffness = movingDown
+            ? NavigationInteractiveDetentMetrics.highlightEdgeStiffnessFollowing
+            : NavigationInteractiveDetentMetrics.highlightEdgeStiffnessLeading
+        self.edgeBottomSpring.stiffness = movingDown
+            ? NavigationInteractiveDetentMetrics.highlightEdgeStiffnessLeading
+            : NavigationInteractiveDetentMetrics.highlightEdgeStiffnessFollowing
+        self.edgeTopSpring.retarget(to: top)
+        self.edgeBottomSpring.retarget(to: bottom)
+
+        self.retargetHighlightSides(rowHeight: rowFrame.height)
+    }
+
+    /// The sides pull in by the shrink, and squash by however far the vertical springs are behind.
+    private func retargetHighlightSides(rowHeight: CGFloat) {
+        let column = ChatListPeekHighlightNode.columnWidth
+        let shrink = max(0.0, column - rowHeight) * self.peekPresence
+        let lag = rowHeight > 0.0 ? abs(self.edgeTopSpring.target - self.edgeTopSpring.value) / rowHeight : 0.0
+        let squash = min(lag, 1.0) * NavigationInteractiveDetentMetrics.highlightSideSquash
+        let base = shrink / 2.0
+        self.edgeLeftSpring.retarget(to: base + squash)
+        self.edgeRightSpring.retarget(to: column - base - squash)
+    }
+
+    func updatePeekLean(_ lean: CGFloat) {
+        guard self.peekLean != lean else {
+            return
+        }
+        self.peekLean = lean
+        self.applyPeekHighlight(transition: .immediate)
+    }
+
+    func updatePeekPresence(_ presence: CGFloat) {
+        guard self.peekPresence != presence else {
+            return
+        }
+        self.peekPresence = presence
+        if self.highlightEdgesActive, let rowFrame = self.peekHighlightRowFrame {
+            self.retargetHighlightSides(rowHeight: rowFrame.height)
+        }
+        // Refreshed before it becomes visible: on a cold launch the layout pass ran before any
+        // row existed, so this is where the measured row height first lands.
+        self.updatePeekSavedMessagesGeometry(transition: .immediate)
+        self.applyPeekAppearance()
+        self.applyPeekHighlight(transition: .immediate)
+    }
+
+    func updatePeekProgress(_ progress: CGFloat, transition: ContainedViewLayoutTransition) {
+        guard self.peekProgress != progress else {
+            return
+        }
+        self.peekProgress = progress
+        // Carries the transition through. A scripted push reports its whole travel in one call
+        // with an animated transition; dropping it here made the avatars snap to their covered
+        // size the instant a row was tapped.
+        self.applyPeekAppearance(transition: transition)
+    }
+
+    /// Both inputs land on the same properties, so they are combined into one number first.
+    ///
+    /// `progress` says how far this page has been uncovered; `presence` pulls whatever distance
+    /// is left all the way to the top. At the detent the page is only a quarter uncovered, but it
+    /// is being *looked at*, so its avatars should be at full size — that is what the second term
+    /// is for. Written this way the two can never fight over a property.
+    private var peekAvatarScale: CGFloat {
+        let t = self.peekProgress + (1.0 - self.peekProgress) * self.peekPresence
+        return NavigationInteractiveDetentMetrics.peekAvatarScale
+            + (1.0 - NavigationInteractiveDetentMetrics.peekAvatarScale) * t
+    }
+
+    private func applyPeekAppearance(transition: ContainedViewLayoutTransition = .immediate) {
+        let avatarScale = self.peekAvatarScale
+
+        // Title, folder tabs and the search field all live in this one view.
+        // Not the whole bar: the progressive blur under it stays, because it is what keeps the
+        // shortcut in the vacated strip legible against the rows behind it. Layer opacity is also
+        // not enough on its own — it leaves the faded content answering taps.
+        if let navigationBarComponentView = self.navigationBarView.view as? ChatListNavigationBar.View {
+            navigationBarComponentView.updatePeekPresence(self.peekPresence, transition: ComponentTransition(transition))
+        }
+        // Exactly what the bar gives up, so the strip is never half-occupied by both.
+
+
+        self.effectiveContainerNode.currentItemNode.forEachItemNode { node in
+            (node as? ChatListItemNode)?.updatePeekPresence(self.peekPresence, avatarScale: avatarScale, transition: transition)
+        }
+    }
+
+    /// The row under a y coordinate, if any.
+    /// The row the finger is on, or the nearest one when it is past the ends of the column.
+    ///
+    /// Clamping rather than reporting nothing. The column can be shorter than the gesture's travel
+    /// — a short list, or the finger simply running below the last row — and answering nil there
+    /// left the four edge springs holding their last target while the finger kept moving, which
+    /// reads as the gesture having stuck rather than as having reached the end.
+    ///
+    /// Only genuinely empty when the column has no rows in it at all.
+    private func peekRow(atY y: CGFloat) -> (node: ChatListItemNode, location: ChatLocation)? {
+        var result: (ChatListItemNode, ChatLocation)?
+        var nearestDistance: CGFloat = .greatestFiniteMagnitude
+        self.effectiveContainerNode.currentItemNode.forEachVisibleItemNode { node in
+            guard let node = node as? ChatListItemNode, let item = node.item, let location = item.content.chatLocation else {
+                return
+            }
+            let frame = node.view.convert(node.bounds, to: self.view)
+            let distance: CGFloat
+            if y < frame.minY {
+                distance = frame.minY - y
+            } else if y >= frame.maxY {
+                distance = y - frame.maxY
+            } else {
+                distance = 0.0
+            }
+            // Strictly closer, so a row actually under the finger (distance 0) always wins and
+            // ties resolve to whichever came first rather than flickering between neighbours.
+            if distance < nearestDistance {
+                nearestDistance = distance
+                result = (node, location)
+            }
+        }
+        return result
+    }
+
+    /// Find the row the block belongs to. Separate from drawing it, because finding it means
+    /// walking the visible item nodes and the springs redraw several times a frame.
+    private func updatePeekHighlightGeometry(transition: ContainedViewLayoutTransition) {
+        guard let location = self.peekHighlightLocation, self.peekHighlightProgress > 0.0 else {
+            self.peekHighlightRowFrame = nil
+            self.applyPeekHighlight(transition: transition)
+            return
+        }
+
+        // While dragging the block belongs to the row under the finger, not to the chat that
+        // happens to be open — the chat is following the block, not the other way round.
+        let targetLocation = self.peekDragRowLocation ?? location
+
+        var rowFrame: CGRect?
+        self.effectiveContainerNode.currentItemNode.forEachVisibleItemNode { node in
+            guard let node = node as? ChatListItemNode, let item = node.item else {
+                return
+            }
+            if item.content.chatLocation == targetLocation {
+                rowFrame = node.view.convert(node.bounds, to: self.view)
+            }
+        }
+        if rowFrame == nil, targetLocation == .peer(id: self.context.account.peerId) {
+            // Saved Messages has no row of its own to sit on — it may not even be in the list —
+            // so the block lands on the shortcut instead. Everything downstream works off a
+            // frame, so nothing else needs to know the difference.
+            rowFrame = self.peekSavedMessagesFrame
+        }
+        self.peekHighlightRowFrame = rowFrame
+        self.applyPeekHighlight(transition: transition)
+    }
+
+    /// Draw the block from the cached row and the springs. Cheap enough to run per spring tick.
+    private func applyPeekHighlight(transition: ContainedViewLayoutTransition) {
+        guard let rowFrame = self.peekHighlightRowFrame, self.peekHighlightProgress > 0.0 else {
+            self.peekHighlightNode.update(rowFrame: nil, leadingFrame: nil, columnWidth: 0.0, presence: 0.0, cornerRadius: 0.0, trailingAlpha: 1.0, color: .clear, transition: transition)
+            return
+        }
+
+        let column = ChatListPeekHighlightNode.columnWidth
+        let presence = self.peekPresence
+
+        let leadingFrame: CGRect
+        if self.highlightEdgesActive {
+            // The four springs own every edge.
+            leadingFrame = CGRect(
+                x: self.edgeLeftSpring.value,
+                y: self.edgeTopSpring.value,
+                width: max(0.0, self.edgeRightSpring.value - self.edgeLeftSpring.value),
+                height: max(0.0, self.edgeBottomSpring.value - self.edgeTopSpring.value)
+            )
+        } else {
+            // No vertical gesture: the block sits on its row, and only pulls in. The shrink
+            // follows the *prediction*, not the gesture — it is part of the same preview as the
+            // blur and the parallax, and happens whether or not a vertical drag ever starts.
+            let shrink = max(0.0, column - rowFrame.height) * presence
+            leadingFrame = CGRect(x: shrink / 2.0, y: rowFrame.minY + self.peekLean, width: column - shrink, height: rowFrame.height)
+        }
+
+        self.peekHighlightNode.update(
+            rowFrame: rowFrame,
+            leadingFrame: leadingFrame,
+            columnWidth: column,
+            presence: self.peekHighlightProgress,
+            cornerRadius: ChatListPeekHighlightNode.lockedCornerRadius * presence,
+            trailingAlpha: 1.0 - presence,
+            color: ChatListPeekHighlightNode.overlayColor(
+                highlighted: self.presentationData.theme.chatList.itemHighlightedBackgroundColor,
+                background: self.presentationData.theme.chatList.itemBackgroundColor
+            ),
+            transition: transition
+        )
+    }
+
     private func contentOffsetChanged(offset: ListViewVisibleContentOffset, listView: ListView, isPrimary: Bool) {
+        // The block is pinned to a row, so it has to keep up when the rows move.
+        if self.peekHighlightLocation != nil {
+            self.updatePeekHighlightGeometry(transition: .immediate)
+        }
+
         guard let containerLayout = self.containerLayout else {
             return
         }

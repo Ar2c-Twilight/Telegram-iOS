@@ -2176,6 +2176,18 @@ public class ChatListItemNode: ItemListRevealOptionsItemNode {
         return reallyHighlighted
     }
     
+    /// Everything in the row except the avatar steps back while the detent is being predicted.
+    ///
+    /// The row already separates the two: `mainContentContainerNode` holds the title, the text,
+    /// the date and every badge, and the avatar lives beside it in `contextContainer`. So this is
+    /// one alpha and one transform, not a list of nodes to keep in sync.
+    func updatePeekPresence(_ presence: CGFloat, avatarScale: CGFloat, transition: ContainedViewLayoutTransition) {
+        let alpha = 1.0 - presence
+        transition.updateAlpha(node: self.mainContentContainerNode, alpha: alpha)
+        transition.updateAlpha(node: self.separatorNode, alpha: alpha)
+        transition.updateTransformScale(node: self.avatarContainerNode, scale: avatarScale)
+    }
+
     func updateIsHighlighted(transition: ContainedViewLayoutTransition) {
         let highlightProgress: CGFloat = self.item?.interaction.highlightedChatLocation?.progress ?? 1.0
         transition.updateCornerRadius(node: self.highlightedBackgroundNode, cornerRadius: self.isRevealOptionsActive ? 26.0 : 0.0)

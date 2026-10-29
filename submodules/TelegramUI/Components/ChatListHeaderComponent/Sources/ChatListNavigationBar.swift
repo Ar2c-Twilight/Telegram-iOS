@@ -192,6 +192,15 @@ public final class ChatListNavigationBar: Component {
 
     public final class View: UIView {
         private let edgeEffectView: EdgeEffectView
+        /// Everything the bar shows, minus the edge effect.
+        ///
+        /// Exists so the detent can fade the bar's contents with one alpha. Setting alpha per
+        /// subview instead meant writing over values the bar manages itself — restoring them all
+        /// to 1 on the way out resurrected `disappearingTabsView`, which then sat over the list.
+        private let contentContainer: UIView
+        /// Sibling of `contentContainer`, for whatever the exposed column puts in the strip the
+        /// title and the tabs vacate. Hidden and inert unless the detent asks for it.
+        public let peekAccessoryContainer: UIView
         
         private let headerBackgroundContainer: GlassBackgroundContainerView
         public let headerContent = ComponentView<Empty>()
@@ -209,6 +218,25 @@ public final class ChatListNavigationBar: Component {
         private var currentAllowAvatarsExpansion: Bool = false
         public private(set) var clippedScrollOffset: CGFloat?
         
+        /// Hand the bar over to the exposed column, and take it back.
+        ///
+        /// Two containers trading places: the bar's contents go out, whatever the column put in
+        /// `peekAccessoryContainer` comes in. `edgeEffectView` is in neither — the progressive blur
+        /// stays, because with the title and the tabs gone it is the only thing left telling what
+        /// sits in the strip apart from the rows scrolling behind it.
+        ///
+        /// Interaction is switched with the alpha rather than left to follow it. The column used to
+        /// fade this bar by setting opacity on its *layer*, which leaves `alpha` at 1 and UIKit hit
+        /// testing it as normal — so the title's buttons and the folder tabs kept answering taps
+        /// aimed at the column.
+        public func updatePeekPresence(_ presence: CGFloat, transition: ComponentTransition) {
+            transition.setAlpha(view: self.contentContainer, alpha: 1.0 - presence)
+            self.contentContainer.isUserInteractionEnabled = presence < 0.5
+
+            transition.setAlpha(view: self.peekAccessoryContainer, alpha: presence)
+            self.peekAccessoryContainer.isUserInteractionEnabled = presence >= 0.5
+        }
+
         public var deferScrollApplication: Bool = false
         private var hasDeferredScrollOffset: Bool = false
         
@@ -241,10 +269,21 @@ public final class ChatListNavigationBar: Component {
             self.bottomContentsContainer = UIView()
             self.bottomContentsContainer.layer.anchorPoint = CGPoint()
             
+            self.contentContainer = UIView()
+            self.contentContainer.layer.anchorPoint = CGPoint()
+            
+            self.peekAccessoryContainer = UIView()
+            self.peekAccessoryContainer.layer.anchorPoint = CGPoint()
+            self.peekAccessoryContainer.alpha = 0.0
+            self.peekAccessoryContainer.isUserInteractionEnabled = false
+            
             super.init(frame: frame)
             
             self.addSubview(self.edgeEffectView)
-            self.addSubview(self.bottomContentsContainer)
+            self.addSubview(self.contentContainer)
+            self.contentContainer.addSubview(self.bottomContentsContainer)
+            // Over the edge effect, so the blur that keeps it legible does not cover it.
+            self.addSubview(self.peekAccessoryContainer)
         }
         
         required init?(coder: NSCoder) {
@@ -354,7 +393,7 @@ public final class ChatListNavigationBar: Component {
                     )
                     searchContentNode.view.layer.anchorPoint = CGPoint()
                     self.searchContentNode = searchContentNode
-                    self.addSubview(searchContentNode.view)
+                    self.contentContainer.addSubview(searchContentNode.view)
                 }
                 
                 let searchSize = CGSize(width: currentLayout.size.width, height: navigationBarSearchContentHeight)
@@ -410,6 +449,9 @@ public final class ChatListNavigationBar: Component {
             edgeEffectHeight = max(0.0, edgeEffectHeight)
             let edgeEffectFrame = CGRect(origin: CGPoint(x: 0.0, y: 0.0), size: CGSize(width: currentLayout.size.width, height: edgeEffectHeight))
             transition.setFrame(view: self.edgeEffectView, frame: edgeEffectFrame)
+            // Full bar, not clipped: the children are positioned in the bar's coordinates and the
+            // bar's own `hitTest` already rejects anything past `currentHeight`.
+            self.contentContainer.frame = CGRect(origin: CGPoint(), size: currentLayout.size)
             self.edgeEffectView.update(content: nil, blur: true, alpha: 0.85, rect: edgeEffectFrame, edge: .top, edgeSize: min(54.0, edgeEffectHeight), transition: transition)
             
             let headerTransition = transition
@@ -505,7 +547,7 @@ public final class ChatListNavigationBar: Component {
             if let headerContentView = self.headerContent.view {
                 if headerContentView.superview == nil {
                     headerContentView.layer.anchorPoint = CGPoint()
-                    self.addSubview(self.headerBackgroundContainer)
+                    self.contentContainer.addSubview(self.headerBackgroundContainer)
                     self.headerBackgroundContainer.contentView.addSubview(headerContentView)
                 }
                 transition.setFrameWithAdditivePosition(view: self.headerBackgroundContainer, frame: headerContentFrame)
@@ -571,6 +613,22 @@ public final class ChatListNavigationBar: Component {
                 accessoryPanelContainerFrame.origin.y -= component.accessoryPanelContainerHeight
             }
             
+            // The strip the detent empties out: from the title bar's *top* edge down to the top
+            // of the folder tabs — everything the two of them occupy.
+            //
+            // Anchored at the header's top rather than its bottom so that y = 0 in this container
+            // is the same line as the leading navigation buttons. Those are laid out at y = 0 of
+            // the header content (`leftButtonsContainerFrame`), so anything the column puts here
+            // lines up with Edit by sitting at the top of the container instead of by being told
+            // a number.
+            let peekAccessoryFrame = CGRect(
+                x: 0.0,
+                y: headerContentFrame.minY,
+                width: visibleSize.width,
+                height: max(0.0, tabsFrame.minY - headerContentFrame.minY)
+            )
+            transition.setFrameWithAdditivePosition(view: self.peekAccessoryContainer, frame: peekAccessoryFrame)
+            
             if let disappearingTabsView = self.disappearingTabsView {
                 disappearingTabsView.layer.anchorPoint = CGPoint()
                 transition.setFrameWithAdditivePosition(view: disappearingTabsView, frame: tabsFrame.offsetBy(dx: 0.0, dy: self.disappearingTabsViewSearch ? (-currentLayout.size.height + 2.0) : 0.0))
@@ -585,7 +643,7 @@ public final class ChatListNavigationBar: Component {
                     tabsNode.view.layer.anchorPoint = CGPoint()
                     tabsNodeTransition = .immediate
                     tabsNode.view.alpha = 1.0
-                    self.addSubview(tabsNode.view)
+                    self.contentContainer.addSubview(tabsNode.view)
                     if !transition.animation.isImmediate {
                         tabsNode.view.layer.animateAlpha(from: 0.0, to: 1.0, duration: 0.2)
                         
@@ -609,7 +667,7 @@ public final class ChatListNavigationBar: Component {
                     accessoryPanelContainer.clipsToBounds = true
                     tabsNodeTransition = .immediate
                     accessoryPanelContainer.view.alpha = 1.0
-                    self.addSubview(accessoryPanelContainer.view)
+                    self.contentContainer.addSubview(accessoryPanelContainer.view)
                     if !transition.animation.isImmediate {
                         accessoryPanelContainer.view.layer.animateAlpha(from: 0.0, to: 1.0, duration: 0.2)
                     }

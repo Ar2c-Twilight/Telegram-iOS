@@ -244,6 +244,53 @@ public class ChatListControllerImpl: TelegramBaseController, ChatListController 
             self.chatListDisplayNode.effectiveContainerNode.updateSelectedChatLocation(data: data as? ChatLocation, progress: progress, transition: transition)
         }
     }
+
+    public override func updateNavigationPeekHighlight(_ data: Any?, progress: CGFloat, transition: ContainedViewLayoutTransition) {
+        if self.isNodeLoaded {
+            self.chatListDisplayNode.updatePeekHighlight(location: data as? ChatLocation, progress: progress, transition: transition)
+        }
+    }
+
+    public override func updateNavigationPeekDrag(_ point: CGPoint?, velocityY: CGFloat) -> Any? {
+        if self.isNodeLoaded {
+            return self.chatListDisplayNode.updatePeekDrag(windowPoint: point, velocityY: velocityY)
+        }
+        return nil
+    }
+
+    public override var supportsNavigationDetentColumn: Bool {
+        // Only the main list. A folder's own list, search results and the archive are pushed on
+        // top of it, and setting *those* aside has nothing underneath worth looking at.
+        if case .chatList(.root) = self.location {
+            return true
+        }
+        return false
+    }
+
+    public override var navigationPeekDragRequestedSwitch: Bool {
+        if self.isNodeLoaded {
+            return self.chatListDisplayNode.peekDragRequestedSwitch
+        }
+        return false
+    }
+
+    public override func updateNavigationPeekLean(_ lean: CGFloat) {
+        if self.isNodeLoaded {
+            self.chatListDisplayNode.updatePeekLean(lean)
+        }
+    }
+
+    public override func updateNavigationPeekPresence(_ presence: CGFloat) {
+        if self.isNodeLoaded {
+            self.chatListDisplayNode.updatePeekPresence(presence)
+        }
+    }
+
+    public override func updateNavigationPeekProgress(_ progress: CGFloat, transition: ContainedViewLayoutTransition) {
+        if self.isNodeLoaded {
+            self.chatListDisplayNode.updatePeekProgress(progress, transition: transition)
+        }
+    }
     
     public init(context: AccountContext, location: ChatListControllerLocation, controlsHistoryPreload: Bool, hideNetworkActivityStatus: Bool = false, previewing: Bool = false, enableDebugActions: Bool) {
         self.context = context
@@ -1390,7 +1437,39 @@ public class ChatListControllerImpl: TelegramBaseController, ChatListController 
             strongSelf.setPeerThreadHidden(peerId: peerId, threadId: threadId, isHidden: isHidden)
         }
         
+        self.chatListDisplayNode.savedMessagesSelected = { [weak self] in
+            // Same path a tapped row takes, for the same reason: the shortcut is a choice made
+            // from the exposed column, and the column's choices re-point the chat that is already
+            // open rather than stacking a new one onto it.
+            //
+            // No fallback. The shortcut only exists while a peek is held — it is transparent
+            // otherwise, and hit testing follows alpha — so the only way to get here with nothing
+            // parked is to tap it during the collapse, where doing nothing is the right answer.
+            guard let self,
+                  let navigationController = self.navigationController as? NavigationController,
+                  let subject = self.chatListDisplayNode.savedMessagesPeekSelection(),
+                  navigationController.requestNavigationPeekSubject(subject) else {
+                return
+            }
+            self.chatListDisplayNode.commitPeekTapSelection(subject)
+        }
+
         self.chatListDisplayNode.mainContainerNode.peerSelected = { [weak self] peer, threadId, animated, activateInput, promoInfo in
+            // In a peek, a tap is the same choice the vertical drag makes one row at a time, so it
+            // takes the same path: re-point the chat that is already open, carrying the direction
+            // the block travels, and let the container put the detent away.
+            //
+            // Checked synchronously and before anything else. The path below opens with an engine
+            // query, and going through it meant building a second controller and arriving with no
+            // direction to animate — which is why a tapped switch cut while a dragged one moved.
+            if let self,
+               let navigationController = self.navigationController as? NavigationController,
+               let subject = self.chatListDisplayNode.peekTapSelection(peerId: peer.id, threadId: threadId),
+               navigationController.requestNavigationPeekSubject(subject) {
+                self.chatListDisplayNode.commitPeekTapSelection(subject)
+                self.chatListDisplayNode.mainContainerNode.currentItemNode.clearHighlightAnimated(true)
+                return
+            }
             Task { @MainActor [weak self] in
                 guard let self else {
                     return
