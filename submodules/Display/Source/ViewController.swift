@@ -315,6 +315,92 @@ public protocol CustomViewControllerNavigationDataSummary: AnyObject {
     open func updateNavigationCustomData(_ data: Any?, progress: CGFloat, transition: ContainedViewLayoutTransition) {
         
     }
+
+    /// Which controller is parked on top of this one while a navigation transition rests at a
+    /// detent, so this one can show a selection for it.
+    ///
+    /// Separate from `updateNavigationCustomData` on purpose. That one is the split layout's
+    /// channel and drives the per-row highlight, which cannot sit between rows or be split —
+    /// both of which the detent's own selection has to do.
+    open func updateNavigationPeekHighlight(_ data: Any?, progress: CGFloat, transition: ContainedViewLayoutTransition) {
+    }
+
+    /// Where the finger is while a gesture parked at a detent has been taken over vertically,
+    /// in window coordinates. `nil` ends the drag.
+    /// Returns the subject the column has settled on, if that changed with this update.
+    @discardableResult
+    open func updateNavigationPeekDrag(_ point: CGPoint?, velocityY: CGFloat) -> Any? {
+        return nil
+    }
+
+    /// Point this controller at a different subject *without rebuilding it*. Returns false if it
+    /// cannot, in which case the caller has to fall back to opening a new one.
+    ///
+    /// The whole reason the detent can switch pages while a finger is moving: building a chat
+    /// controller and laying it out blocks the main thread for about 90 ms, which is eleven
+    /// frames of nothing moving. Swapping what an existing one is pointed at costs a history
+    /// node, and the rest of the page — bar, input, wallpaper — simply stays.
+    @discardableResult
+    open func updateNavigationPeekSubject(_ subject: Any?) -> Bool {
+        return false
+    }
+
+    /// Vertical travel so far, before the gesture has been taken over. Points.
+    ///
+    /// The block leans towards the finger before it is allowed to move, so the takeover is
+    /// something the user has already felt coming rather than something that happens to them.
+    open func updateNavigationPeekLean(_ lean: CGFloat) {
+    }
+
+    /// The layer of this controller that counts as its backdrop, for a transition parked at a
+    /// detent to blur. `nil` means it has none and nothing is blurred.
+    ///
+    /// Only the backdrop, never the whole controller: blurring everything means blurring content
+    /// that is still being read, and content that moves, which puts the blur back on the critical
+    /// path every frame. A wallpaper does not change, so Core Animation renders its blur once and
+    /// reuses it.
+    open var navigationPeekBackdropNode: ASDisplayNode? {
+        return nil
+    }
+
+    /// How strongly the detent is being predicted, 0…1.
+    ///
+    /// One scalar, several properties: the chrome that belongs to reading this page — its bar, its
+    /// input — has no job while the page is becoming a backdrop, so it goes away by the same
+    /// amount and at the same moment as everything else in the preview.
+    open func updateNavigationPeekPresence(_ presence: CGFloat) {
+    }
+
+    /// How far the transition above this controller has travelled, 0 = covering, 1 = gone.
+    ///
+    /// Comes with its own transition because it is *not* always driven per frame: an interactive
+    /// landing reports every frame as `.immediate`, a scripted push reports once as `.animated`.
+    /// Applying with whatever arrives keeps both correct.
+    open func updateNavigationPeekProgress(_ progress: CGFloat, transition: ContainedViewLayoutTransition) {
+    }
+
+    /// Whether this controller is willing to be *set aside* at a detent instead of simply popped.
+    ///
+    /// Opt-in on both sides, because the detent is not a generic navigation feature: it only
+    /// means something when the page underneath is a list of things to switch between. Every
+    /// other back swipe in the app has to keep behaving exactly as it did.
+    open var supportsNavigationDetent: Bool {
+        return false
+    }
+
+    /// Whether this controller can serve as the column the detent exposes.
+    open var supportsNavigationDetentColumn: Bool {
+        return false
+    }
+
+    /// Whether the drag that just ended asked for a different page to be opened.
+    ///
+    /// Only the column knows this. Opening a page is asynchronous, so by the time the container
+    /// could look for evidence — a pending child — the request has not been made yet; it has to
+    /// ask the one that made it.
+    open var navigationPeekDragRequestedSwitch: Bool {
+        return false
+    }
     
     open var customData: Any? {
         get {

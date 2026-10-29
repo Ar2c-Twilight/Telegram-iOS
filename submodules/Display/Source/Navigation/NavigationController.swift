@@ -1535,8 +1535,36 @@ open class NavigationController: UINavigationController, ContainableController, 
     
     public func pushViewController(_ controller: ViewController, animated: Bool = true, completion: @escaping () -> Void) {
         var controllers = self.viewControllers
+        if animated, self.canReplaceTopAtDetent, controllers.count > 1 {
+            // The controller below is parked on screen and is being used as a source. Opening
+            // something from it swaps what is on top instead of stacking onto it — the same thing
+            // a detail column does in a split layout. Un-animated, because the layout is not
+            // changing: only the contents of the slot are.
+            controllers.removeLast()
+            controllers.append(controller)
+            self.setViewControllers(controllers, animated: false, completion: completion)
+            return
+        }
         controllers.append(controller)
         self.setViewControllers(controllers, animated: animated, completion: completion)
+    }
+
+    /// Re-point the chat on top without going through navigation. See
+    /// `NavigationContainer.requestPeekSubject`. False means nothing is parked, so the caller
+    /// should open the chat the ordinary way.
+    public func requestNavigationPeekSubject(_ subject: Any) -> Bool {
+        if let rootContainer = self.rootContainer, case let .flat(container) = rootContainer {
+            return container.requestPeekSubject(subject)
+        }
+        return false
+    }
+
+    /// True while the flat container has a transition parked at an intermediate detent.
+    private var canReplaceTopAtDetent: Bool {
+        if let rootContainer = self.rootContainer, case let .flat(container) = rootContainer {
+            return container.canReplaceTopAtDetent
+        }
+        return false
     }
         
     open override func pushViewController(_ viewController: UIViewController, animated: Bool) {
@@ -1668,6 +1696,27 @@ open class NavigationController: UINavigationController, ContainableController, 
                 viewControllers.append(controller)
             } else {
                 assert(true)
+            }
+        }
+
+        // Every stack mutation funnels through here — `pushViewController`,
+        // `replaceAllButRootController`, `replaceControllersAndPush`. Opening a chat from the list
+        // takes the second of those, so hooking only the push would miss it.
+        //
+        // When a transition is parked and the only thing that changes is the controller on top,
+        // the layout is not changing: just what sits in the slot. Animating it would play a push
+        // over a transition that is supposed to stay where it is.
+        var animated = animated
+        if animated, self.canReplaceTopAtDetent, viewControllers.count > 1, viewControllers.count == self.viewControllers.count {
+            var sharesPrefix = true
+            for i in 0 ..< viewControllers.count - 1 {
+                if viewControllers[i] !== self.viewControllers[i] {
+                    sharesPrefix = false
+                    break
+                }
+            }
+            if sharesPrefix {
+                animated = false
             }
         }
         
