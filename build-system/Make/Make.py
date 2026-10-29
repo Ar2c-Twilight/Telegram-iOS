@@ -701,6 +701,12 @@ def build(bazel, arguments):
 
     bazel_command_line.set_split_swiftmodules(arguments.enableParallelSwiftmoduleGeneration)
 
+    # 本地扩展：用环境变量注入额外的 bazel flag，例如 --//Telegram:disableExtensions
+    extra_bazel_flags = os.environ.get('TELEGRAM_EXTRA_BAZEL_FLAGS', '').split()
+    if len(extra_bazel_flags) != 0:
+        print('Appending extra bazel flags: {}'.format(' '.join(extra_bazel_flags)))
+        bazel_command_line.common_args += extra_bazel_flags
+
     bazel_command_line.invoke_build()
 
     if arguments.outputBuildArtifactsPath is not None:

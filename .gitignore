@@ -84,3 +84,10 @@ xcode-files
 **/node_modules/
 tools/sim-watcher/dist/
 .mcp.json
+.run-unpack/
+
+# 本地构建配置：含 api_id / api_hash，每人按 template 自己填一份
+build-system/*-development-configuration.json
+
+# 本地构建产物
+Telegram.app/
