@@ -1,29 +1,39 @@
-# Chat Sidebar
+# Telegram-iOS
 
 A third resting point for the interactive back gesture in Telegram for iOS: let go
 anywhere mid-swipe and the chat list stays as a narrow column beside the chat,
 instead of the gesture being forced to resolve into "back" or "not back".
 
-![Demo](https://raw.githubusercontent.com/Ar2c-Twilight/Tg-ChatSideBar/master/docs/demo.gif)
+![Demo](https://raw.githubusercontent.com/Ar2c-Twilight/Tg-ChatSideBar/master/Tg-ChatSideBar-DemoVieo/main.jpg)
 
-*600 px / 20 fps. [Watch it at 1024 px / 60 fps →](https://github.com/Ar2c-Twilight/Tg-ChatSideBar/releases/download/demo/main.mp4)
-(24 MB, MP4) — this interaction is about motion quality, and a GIF undersells it.
-Shot from the standalone prototype linked below.*
+*[Watch the 13s demo — 1024 px / 60 fps →](https://github.com/Ar2c-Twilight/Tg-ChatSideBar/releases/download/demo/main.mp4)
+(24 MB, MP4)*
 
 Based on upstream `release-12.9.2`
 (`6ad963e5b62d354da79040f388ae2b9132fb17b8`) · **[see the full diff →](https://github.com/Ar2c-Twilight/Telegram-iOS/compare/release-12.9.2...chat-sidebar)**
-(24 files, +2693 / −39)
+(24 source files, +2696 / −39)
 
 ---
 
 ## The idea
 
-The interactive pop already drives a single scalar — `NavigationTransitionCoordinator.progress`,
-where 0 means the top controller covers the screen and 1 means it is gone. Everything the
-transition draws (the top frame, the parallax beneath it, the dim, the edge shadow) is a pure
-function of that number.
+**One swipe switches the chat, and your finger never has to leave the screen.**
 
-So a resting point in between needs no new geometry. It needs a third answer to one question:
+Start the back gesture, stop partway, and the list is already there as a column
+beside the chat you were reading. Keep the same finger down, move it vertically,
+and the column follows it — the chat behind swaps as you pass each row. Release
+when you are on the one you want.
+
+![One gesture, start to finish](https://raw.githubusercontent.com/Ar2c-Twilight/Tg-ChatSideBar/master/Tg-ChatSideBar-DemoVieo/the-idea.gif)
+
+Today that same errand is: finish the swipe, wait for the list, find the row, tap
+it, wait for the chat. Four interactions and two full-screen transitions, to do
+something the hand had already begun.
+
+None of it needs new geometry. The interactive pop already drives a single scalar —
+`NavigationTransitionCoordinator.progress`, 0 when the top controller covers the
+screen, 1 when it is gone — and everything the transition draws is a pure function
+of that number. A resting point in between is simply a third answer to one question:
 *where does this gesture land?*
 
 ```swift
@@ -36,72 +46,56 @@ public enum NavigationInteractiveDetent {
 
 Everything else follows from that one addition.
 
-## How the decision is made
+## Prototype
 
-`.peek` has to be chosen from a finger that is still moving, so it is judged on two criteria at
-once — position and momentum:
+This started outside Telegram. The interaction was designed and tuned in a standalone
+UIKit app — no storyboards, no dependencies — and only then carried across:
+**[Ar2c-Twilight/Tg-ChatSideBar](https://github.com/Ar2c-Twilight/Tg-ChatSideBar)**
 
-| | value | why |
-|---|---|---|
-| `peekWindow` | `0.2 ... 0.8` | A single window, no hysteresis. This is a *position*; the user can see where it is. |
-| `momentumEnterThreshold` | `0.4` (≈315 pt/s) | Momentum is the noisy input, so it gets two thresholds. |
-| `momentumExitThreshold` | `0.6` (≈470 pt/s) | Revoking the prediction is deliberately harder than granting it — a single threshold makes the decision flicker while a finger hovers near the boundary. |
+Tuning a gesture means changing a number and feeling the result, over and over. Inside
+Telegram-iOS that costs a bazel build per attempt; in a small UIKit app it costs seconds.
+So every detent, threshold and spring constant here was settled there first. The demo
+above was shot from that prototype.
 
-Once `.peek` is predicted, the transition previews it: the page on top takes a 12pt Gaussian blur
-and shrinks to `0.96` while the wallpaper behind it grows. Both come off the same number, so they
-read as one movement rather than two that happen to coincide.
+## How it holds together
 
-## Interruptibility
+**Choosing the detent.** `.peek` has to be picked from a finger that is still
+moving, so it is judged on position *and* momentum. Position gets a single window
+with no hysteresis — the user can see where it is, so there is nothing to flicker.
+Momentum is the noisy input, so it gets two thresholds, and revoking the prediction
+is deliberately harder than granting it.
 
-Catching a spring mid-flight is the whole point, and neither `UIViewPropertyAnimator` nor
-`CASpringAnimation` can do it here: both animate a *property* and hand back only a fraction, while
-this needs the value **and the velocity** at an arbitrary moment in order to continue from there.
+**Previewing it.** Once `.peek` is predicted the page on top blurs and shrinks
+slightly while the wallpaper behind it grows. Both come off the same number, so
+they read as one movement rather than two that coincide.
 
-`NavigationSpringScalar` integrates the spring directly on a display link, so taking it over is
-just `stop()` — which returns position and velocity together. The finger continues with no snap
-and no rebound.
+**Staying catchable.** `NavigationSpringScalar` integrates the landing spring on a
+display link rather than using `UIViewPropertyAnimator` or `CASpringAnimation`:
+those animate a *property* and hand back only a fraction, while catching a gesture
+mid-flight needs the value **and the velocity** at an arbitrary moment. Here that is
+`stop()`, which returns both, and the finger continues with no snap.
 
-## Dismissing a parked detent
+**Not fighting for the touch.** A parked detent is dismissed by a scroll on the chat
+— while that same scroll still has to scroll the chat. `PeekDismissTouchSniffer`
+never leaves `.possible`, and a recognizer that never reaches `.began` takes part in
+no arbitration: it blocks nothing, and nothing underneath has to be told to fail.
 
-A transition parked at a detent is dismissed by a scroll on the controller on top — while that
-same scroll still has to scroll that controller. Two things happening to one finger, not two
-gestures competing for it.
+**The column** is 92 pt — `16 + 60 + 16`, the chat row's own avatar inset and
+diameter — so the avatar sits centred in it on every device, where a fraction of the
+screen width would drift. Two nodes live there: the selection block, and a Saved
+Messages shortcut in the strip the title bar and folder tabs vacate.
 
-`PeekDismissTouchSniffer` therefore never leaves `.possible`. A recognizer that never reaches
-`.began` takes part in no arbitration: it blocks nothing, nothing has to be told to fail for it,
-and every existing interaction underneath keeps working untouched. It watches and reports.
-
-## The column
-
-`peekColumnWidth` is `92.0`, and it is derived rather than chosen: `16 + 60 + 16`, the chat row's
-own avatar inset and diameter. The avatar ends up centred in the column with equal padding on both
-sides — a device-independent constraint, where a fraction of the screen width would drift.
-
-Two nodes live there:
-
-- **`ChatListPeekHighlightNode`** — the selection block. Deliberately *not* the per-row highlight
-  `ChatListItemNode` already has: that one lives inside a row, so it cannot sit between two rows,
-  cannot be split, and cannot outlive the row being recycled. The vertical gesture needs all three.
-- **`ChatListPeekSavedMessagesNode`** — a Saved Messages shortcut in the strip the title bar and
-  folder tabs vacate when the detent fades them out.
-
-While dragging vertically to pick a chat, the page is only allowed to change below
-`peekDragCommitVelocity` (90 pt/s). That threshold is set low on purpose: opening a chat blocks the
-main thread for about **90 ms** (measured; median of the stalls during a drag, worst 132 ms), which
-at 120 Hz is eleven frames in which nothing moves — not the block, not even touch delivery. Every
-switch is expensive enough that it should happen only when the finger has genuinely stopped.
-
-Velocity, not acceleration: a finger sweeping at a steady speed has no acceleration at all, so
-acceleration would read the middle of a sweep as "settled" — exactly the rows that must be skipped.
+> The reasoning behind each number — and the measurements it came from — is
+> documented inline in the source files listed below.
 
 ## The commits
 
 | | |
 |---|---|
-| [`80f6854`](../../commit/80f685421f) | `build:` inject extra bazel flags via env, ignore local config |
-| [`16d4c8b`](../../commit/16d4c8bbd5) | `Display:` interruptible interactive detents for navigation |
-| [`9061125`](../../commit/9061125184) | `ChatListUI:` peek column highlight and saved-messages node |
-| [`b44c091`](../../commit/b44c0919f6) | Wire sidebar into chat, tab bar and debug settings |
+| [`80f6854`](https://github.com/Ar2c-Twilight/Telegram-iOS/commit/80f685421f) | `build:` inject extra bazel flags via env, ignore local config |
+| [`16d4c8b`](https://github.com/Ar2c-Twilight/Telegram-iOS/commit/16d4c8bbd5) | `Display:` interruptible interactive detents for navigation |
+| [`9061125`](https://github.com/Ar2c-Twilight/Telegram-iOS/commit/9061125184) | `ChatListUI:` peek column highlight and saved-messages node |
+| [`b44c091`](https://github.com/Ar2c-Twilight/Telegram-iOS/commit/b44c0919f6) | Wire sidebar into chat, tab bar and debug settings |
 
 New files:
 
@@ -117,34 +111,27 @@ submodules/ChatListUI/Sources/Node/ChatListPeekSavedMessagesNode.swift
 
 Follow upstream's [build instructions](https://github.com/TelegramMessenger/Telegram-iOS#readme)
 first — you need your own `api_id` / `api_hash` from [my.telegram.org](https://my.telegram.org/apps)
-in `build-system/<name>-development-configuration.json`.
-
-Then:
+in `build-system/<name>-development-configuration.json`. Then:
 
 ```bash
-xcrun simctl list devices        # find the UDID you want
+xcrun simctl list devices     # find the UDID you want
 export TELEGRAM_SIM=<that-udid>
-./run.sh                 # build + install + launch on the simulator
-./run.sh device          # on a real device (needs TELEGRAM_DEVICE)
+./run.sh                      # build + install + launch on the simulator
+./run.sh device               # on a real device (needs TELEGRAM_DEVICE)
 ```
 
 Two things this fork adds to make a personal-account build work:
 
-- **`TELEGRAM_EXTRA_BAZEL_FLAGS`** — an env hook in `build-system/Make/Make.py` for passing extra
-  bazel flags. Device builds need `--//Telegram:disableExtensions`, because Xcode-managed signing
-  only signs the main app, and the analysis phase otherwise fails on `BroadcastUpload`.
-- **QR login in `DEBUG`** — upstream's own debug entry point for logging in from another device,
-  gated off by `#if DEBUG && false`. Re-enabled here: tap the notice text under the phone field.
+- **`TELEGRAM_EXTRA_BAZEL_FLAGS`** — an env hook in `build-system/Make/Make.py`.
+  Device builds need `--//Telegram:disableExtensions`, because Xcode-managed signing
+  only signs the main app and the analysis phase otherwise fails on `BroadcastUpload`.
+- **QR login in `DEBUG`** — upstream's own debug entry point for logging in from
+  another device, gated off by `#if DEBUG && false`. Re-enabled here: tap the notice
+  text under the phone field.
 
-> ⚠️ Build through `Make.py`, not through Xcode. `rules_xcodeproj` adds
-> `--//Telegram:disableStripping` and `--features=-swift.debug_prefix_map`, which make `swiftc`
-> crash (signal 6) in MandatoryInlining while deserializing `TelegramCallsUI` SIL vtables under the
-> device configuration. The same code builds fine through `Make.py`.
-
-## Also
-
-A standalone UIKit prototype of the same interaction, without the Telegram codebase around it:
-**[Ar2c-Twilight/Tg-ChatSideBar](https://github.com/Ar2c-Twilight/Tg-ChatSideBar)**
+> ⚠️ Build through `Make.py`, not through Xcode. `rules_xcodeproj` adds flags that make
+> `swiftc` crash in MandatoryInlining while deserializing `TelegramCallsUI` SIL vtables
+> under the device configuration. The same code builds fine through `Make.py`.
 
 ## License
 
