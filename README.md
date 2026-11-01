@@ -1,116 +1,149 @@
-# Telegram iOS Source Code Compilation Guide
+# Chat Sidebar
 
-We welcome all developers to use our API and source code to create applications on our platform.
-There are several things we require from **all developers** for the moment.
+A third resting point for the interactive back gesture in Telegram for iOS: let go
+anywhere mid-swipe and the chat list stays as a narrow column beside the chat,
+instead of the gesture being forced to resolve into "back" or "not back".
 
-# Creating your Telegram Application
+[![Demo video](https://raw.githubusercontent.com/Ar2c-Twilight/Tg-ChatSideBar/master/docs/demo-poster.png)](https://github.com/Ar2c-Twilight/Tg-ChatSideBar/releases/download/demo/main.mp4)
 
-1. [**Obtain your own api_id**](https://core.telegram.org/api/obtaining_api_id) for your application.
-2. Please **do not** use the name Telegram for your app — or make sure your users understand that it is unofficial.
-3. Kindly **do not** use our standard logo (white paper plane in a blue circle) as your app's logo.
-3. Please study our [**security guidelines**](https://core.telegram.org/mtproto/security_guidelines) and take good care of your users' data and privacy.
-4. Please remember to publish **your** code too in order to comply with the licences.
+*↑ click for the 13s demo (24 MB, MP4). Shot from the standalone prototype linked below.*
 
-# Quick Compilation Guide
+Based on upstream `release-12.9.2`
+(`6ad963e5b62d354da79040f388ae2b9132fb17b8`) · **[see the full diff →](https://github.com/Ar2c-Twilight/Telegram-iOS/compare/release-12.9.2...chat-sidebar)**
+(24 files, +2693 / −39)
 
-## Get the Code
+---
 
-```
-git clone --recursive -j8 https://github.com/TelegramMessenger/Telegram-iOS.git
-```
+## The idea
 
-## Setup Xcode
+The interactive pop already drives a single scalar — `NavigationTransitionCoordinator.progress`,
+where 0 means the top controller covers the screen and 1 means it is gone. Everything the
+transition draws (the top frame, the parallax beneath it, the dim, the edge shadow) is a pure
+function of that number.
 
-Install Xcode (directly from https://developer.apple.com/download/applications or using the App Store).
+So a resting point in between needs no new geometry. It needs a third answer to one question:
+*where does this gesture land?*
 
-## Adjust Configuration
-
-1. Generate a random identifier:
-```
-openssl rand -hex 8
-```
-2. Create a new Xcode project. Use `Telegram` as the Product Name. Use `org.{identifier from step 1}` as the Organization Identifier.
-3. Open `Keychain Access` and navigate to `Certificates`. Locate `Apple Development: your@email.address (XXXXXXXXXX)` and double tap the certificate. Under `Details`, locate `Organizational Unit`. This is the Team ID.
-4. Edit `build-system/template_minimal_development_configuration.json`. Use data from the previous steps.
-
-## Generate an Xcode project
-
-```
-python3 build-system/Make/Make.py \
-    --cacheDir="$HOME/telegram-bazel-cache" \
-    generateProject \
-    --configurationPath=build-system/template_minimal_development_configuration.json \
-    --xcodeManagedCodesigning
+```swift
+public enum NavigationInteractiveDetent {
+    case cancel     // back to the top controller — the existing animateCancel path
+    case peek       // both controllers on screen: a column of the one below
+    case complete   // the pop goes through — the existing animateCompletion path
+}
 ```
 
-# Advanced Compilation Guide
+Everything else follows from that one addition.
 
-## Xcode
+## How the decision is made
 
-1. Copy and edit `build-system/appstore-configuration.json`.
-2. Copy `build-system/fake-codesigning`. Create and download provisioning profiles, using the `profiles` folder as a reference for the entitlements.
-3. Generate an Xcode project:
+`.peek` has to be chosen from a finger that is still moving, so it is judged on two criteria at
+once — position and momentum:
+
+| | value | why |
+|---|---|---|
+| `peekWindow` | `0.2 ... 0.8` | A single window, no hysteresis. This is a *position*; the user can see where it is. |
+| `momentumEnterThreshold` | `0.4` (≈315 pt/s) | Momentum is the noisy input, so it gets two thresholds. |
+| `momentumExitThreshold` | `0.6` (≈470 pt/s) | Revoking the prediction is deliberately harder than granting it — a single threshold makes the decision flicker while a finger hovers near the boundary. |
+
+Once `.peek` is predicted, the transition previews it: the page on top takes a 12pt Gaussian blur
+and shrinks to `0.96` while the wallpaper behind it grows. Both come off the same number, so they
+read as one movement rather than two that happen to coincide.
+
+## Interruptibility
+
+Catching a spring mid-flight is the whole point, and neither `UIViewPropertyAnimator` nor
+`CASpringAnimation` can do it here: both animate a *property* and hand back only a fraction, while
+this needs the value **and the velocity** at an arbitrary moment in order to continue from there.
+
+`NavigationSpringScalar` integrates the spring directly on a display link, so taking it over is
+just `stop()` — which returns position and velocity together. The finger continues with no snap
+and no rebound.
+
+## Dismissing a parked detent
+
+A transition parked at a detent is dismissed by a scroll on the controller on top — while that
+same scroll still has to scroll that controller. Two things happening to one finger, not two
+gestures competing for it.
+
+`PeekDismissTouchSniffer` therefore never leaves `.possible`. A recognizer that never reaches
+`.began` takes part in no arbitration: it blocks nothing, nothing has to be told to fail for it,
+and every existing interaction underneath keeps working untouched. It watches and reports.
+
+## The column
+
+`peekColumnWidth` is `92.0`, and it is derived rather than chosen: `16 + 60 + 16`, the chat row's
+own avatar inset and diameter. The avatar ends up centred in the column with equal padding on both
+sides — a device-independent constraint, where a fraction of the screen width would drift.
+
+Two nodes live there:
+
+- **`ChatListPeekHighlightNode`** — the selection block. Deliberately *not* the per-row highlight
+  `ChatListItemNode` already has: that one lives inside a row, so it cannot sit between two rows,
+  cannot be split, and cannot outlive the row being recycled. The vertical gesture needs all three.
+- **`ChatListPeekSavedMessagesNode`** — a Saved Messages shortcut in the strip the title bar and
+  folder tabs vacate when the detent fades them out.
+
+While dragging vertically to pick a chat, the page is only allowed to change below
+`peekDragCommitVelocity` (90 pt/s). That threshold is set low on purpose: opening a chat blocks the
+main thread for about **90 ms** (measured; median of the stalls during a drag, worst 132 ms), which
+at 120 Hz is eleven frames in which nothing moves — not the block, not even touch delivery. Every
+switch is expensive enough that it should happen only when the finger has genuinely stopped.
+
+Velocity, not acceleration: a finger sweeping at a steady speed has no acceleration at all, so
+acceleration would read the middle of a sweep as "settled" — exactly the rows that must be skipped.
+
+## The commits
+
+| | |
+|---|---|
+| [`80f6854`](../../commit/80f685421f) | `build:` inject extra bazel flags via env, ignore local config |
+| [`16d4c8b`](../../commit/16d4c8bbd5) | `Display:` interruptible interactive detents for navigation |
+| [`9061125`](../../commit/9061125184) | `ChatListUI:` peek column highlight and saved-messages node |
+| [`b44c091`](../../commit/b44c0919f6) | Wire sidebar into chat, tab bar and debug settings |
+
+New files:
+
 ```
-python3 build-system/Make/Make.py \
-    --cacheDir="$HOME/telegram-bazel-cache" \
-    generateProject \
-    --configurationPath=configuration_from_step_1.json \
-    --codesigningInformationPath=directory_from_step_2
+submodules/Display/Source/Navigation/NavigationInteractiveDetent.swift
+submodules/Display/Source/Navigation/NavigationSpringScalar.swift
+submodules/Display/Source/Navigation/PeekDismissTouchSniffer.swift
+submodules/ChatListUI/Sources/Node/ChatListPeekHighlightNode.swift
+submodules/ChatListUI/Sources/Node/ChatListPeekSavedMessagesNode.swift
 ```
 
-## IPA
+## Building
 
-1. Repeat the steps from the previous section. Use distribution provisioning profiles.
-2. Run:
-```
-python3 build-system/Make/Make.py \
-    --cacheDir="$HOME/telegram-bazel-cache" \
-    build \
-    --configurationPath=...see previous section... \
-    --codesigningInformationPath=...see previous section... \
-    --buildNumber=100001 \
-    --configuration=release_arm64
-```
+Follow upstream's [build instructions](https://github.com/TelegramMessenger/Telegram-iOS#readme)
+first — you need your own `api_id` / `api_hash` from [my.telegram.org](https://my.telegram.org/apps)
+in `build-system/<name>-development-configuration.json`.
 
-# FAQ
+Then:
 
-## Xcode is stuck at "build-request.json not updated yet"
-
-Occasionally, you might observe the following message in your build log:
-```
-"/Users/xxx/Library/Developer/Xcode/DerivedData/Telegram-xxx/Build/Intermediates.noindex/XCBuildData/xxx.xcbuilddata/build-request.json" not updated yet, waiting...
+```bash
+xcrun simctl list devices        # find the UDID you want
+export TELEGRAM_SIM=<that-udid>
+./run.sh                 # build + install + launch on the simulator
+./run.sh device          # on a real device (needs TELEGRAM_DEVICE)
 ```
 
-Should this occur, simply cancel the ongoing build and initiate a new one.
+Two things this fork adds to make a personal-account build work:
 
-## Telegram_xcodeproj: no such package 
+- **`TELEGRAM_EXTRA_BAZEL_FLAGS`** — an env hook in `build-system/Make/Make.py` for passing extra
+  bazel flags. Device builds need `--//Telegram:disableExtensions`, because Xcode-managed signing
+  only signs the main app, and the analysis phase otherwise fails on `BroadcastUpload`.
+- **QR login in `DEBUG`** — upstream's own debug entry point for logging in from another device,
+  gated off by `#if DEBUG && false`. Re-enabled here: tap the notice text under the phone field.
 
-Following a system restart, the auto-generated Xcode project might encounter a build failure accompanied by this error:
-```
-ERROR: Skipping '@rules_xcodeproj_generated//generator/Telegram/Telegram_xcodeproj:Telegram_xcodeproj': no such package '@rules_xcodeproj_generated//generator/Telegram/Telegram_xcodeproj': BUILD file not found in directory 'generator/Telegram/Telegram_xcodeproj' of external repository @rules_xcodeproj_generated. Add a BUILD file to a directory to mark it as a package.
-```
+> ⚠️ Build through `Make.py`, not through Xcode. `rules_xcodeproj` adds
+> `--//Telegram:disableStripping` and `--features=-swift.debug_prefix_map`, which make `swiftc`
+> crash (signal 6) in MandatoryInlining while deserializing `TelegramCallsUI` SIL vtables under the
+> device configuration. The same code builds fine through `Make.py`.
 
-If you encounter this issue, re-run the project generation steps in the README.
+## Also
 
+A standalone UIKit prototype of the same interaction, without the Telegram codebase around it:
+**[Ar2c-Twilight/Tg-ChatSideBar](https://github.com/Ar2c-Twilight/Tg-ChatSideBar)**
 
-# Tips
+## License
 
-## Codesigning is not required for simulator-only builds
-
-Add `--disableProvisioningProfiles`:
-```
-python3 build-system/Make/Make.py \
-    --cacheDir="$HOME/telegram-bazel-cache" \
-    generateProject \
-    --configurationPath=path-to-configuration.json \
-    --codesigningInformationPath=path-to-provisioning-data \
-    --disableProvisioningProfiles
-```
-
-## Versions
-
-Each release is built using a specific Xcode version (see `versions.json`). The helper script checks the versions of the installed software and reports an error if they don't match the ones specified in `versions.json`. It is possible to bypass these checks:
-
-```
-python3 build-system/Make/Make.py --overrideXcodeVersion build ... # Don't check the version of Xcode
-```
+GPLv2, same as upstream Telegram for iOS. The files added by this branch are GPLv2 as well.
