@@ -4,9 +4,11 @@ A third resting point for the interactive back gesture in Telegram for iOS: let 
 anywhere mid-swipe and the chat list stays as a narrow column beside the chat,
 instead of the gesture being forced to resolve into "back" or "not back".
 
-[![Demo video](https://raw.githubusercontent.com/Ar2c-Twilight/Tg-ChatSideBar/master/docs/demo-poster.png)](https://github.com/Ar2c-Twilight/Tg-ChatSideBar/releases/download/demo/main.mp4)
+![Demo](https://raw.githubusercontent.com/Ar2c-Twilight/Tg-ChatSideBar/master/docs/demo.gif)
 
-*↑ click for the 13s demo (24 MB, MP4). Shot from the standalone prototype linked below.*
+*600 px / 20 fps. [Watch it at 1024 px / 60 fps →](https://github.com/Ar2c-Twilight/Tg-ChatSideBar/releases/download/demo/main.mp4)
+(24 MB, MP4) — this interaction is about motion quality, and a GIF undersells it.
+Shot from the standalone prototype linked below.*
 
 Based on upstream `release-12.9.2`
 (`6ad963e5b62d354da79040f388ae2b9132fb17b8`) · **[see the full diff →](https://github.com/Ar2c-Twilight/Telegram-iOS/compare/release-12.9.2...chat-sidebar)**
