@@ -86,8 +86,8 @@ tools/sim-watcher/dist/
 .mcp.json
 .run-unpack/
 
-# 本地构建配置：含 api_id / api_hash，每人按 template 自己填一份
+# Local build configuration: contains api_id / api_hash; everyone fills in their own copy from the template
 build-system/*-development-configuration.json
 
-# 本地构建产物
+# Local build artifacts
 Telegram.app/

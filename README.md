@@ -57,6 +57,12 @@ Telegram-iOS that costs a bazel build per attempt; in a small UIKit app it costs
 So every detent, threshold and spring constant here was settled there first. The demo
 above was shot from that prototype.
 
+## Status
+
+Built and run on a physical iPhone 16e, not only in the simulator. The interaction is
+complete end to end — all three detents, the vertical takeover, and catching the spring
+mid-flight — and holds frame rate on device throughout.
+
 ## How it holds together
 
 **Choosing the detent.** `.peek` has to be picked from a finger that is still
