@@ -117,13 +117,24 @@ submodules/ChatListUI/Sources/Node/ChatListPeekSavedMessagesNode.swift
 
 Follow upstream's [build instructions](https://github.com/TelegramMessenger/Telegram-iOS#readme)
 first — you need your own `api_id` / `api_hash` from [my.telegram.org](https://my.telegram.org/apps)
-in `build-system/<name>-development-configuration.json`. Then:
+in `build-system/<name>-development-configuration.json`. After filling in `api_id` / `api_hash`,
+you can either use `run.sh`:
 
 ```bash
 xcrun simctl list devices     # find the UDID you want
 export TELEGRAM_SIM=<that-udid>
 ./run.sh                      # build + install + launch on the simulator
 ./run.sh device               # on a real device (needs TELEGRAM_DEVICE)
+```
+
+or generate an Xcode project and compile in Xcode:
+
+```bash
+python3 build-system/Make/Make.py \
+    --cacheDir="$HOME/telegram-bazel-cache" \
+    generateProject \
+    --configurationPath=build-system/<name>-development-configuration.json \
+    --xcodeManagedCodesigning
 ```
 
 Two things this fork adds to make a personal-account build work:
@@ -134,10 +145,6 @@ Two things this fork adds to make a personal-account build work:
 - **QR login in `DEBUG`** — upstream's own debug entry point for logging in from
   another device, gated off by `#if DEBUG && false`. Re-enabled here: tap the notice
   text under the phone field.
-
-> ⚠️ Build through `Make.py`, not through Xcode. `rules_xcodeproj` adds flags that make
-> `swiftc` crash in MandatoryInlining while deserializing `TelegramCallsUI` SIL vtables
-> under the device configuration. The same code builds fine through `Make.py`.
 
 ## License
 
